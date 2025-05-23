@@ -1,0 +1,51 @@
+--- apis/__init__.py.orig	2025-05-22 19:57:00.000000000 -0400
++++ apis/__init__.py	2025-05-22 19:57:00.000000000 -0400
+@@ -741,12 +741,14 @@
+ 
+ 
+ class KlingSingleImageEffectInput(BaseModel):
++    model_config = {"protected_namespaces": ()}
+     model_name: KlingSingleImageEffectModelName
+     image: str = Field(
+         ...,
+         description='Reference Image. URL or Base64 encoded string (without data:image prefix). File size cannot exceed 10MB, resolution not less than 300*300px, aspect ratio between 1:2.5 ~ 2.5:1.',
+     )
+     duration: KlingSingleImageEffectDuration
++
+     
+ 
+ class KlingDualCharacterEffectInput(BaseModel):
++    model_config = {"protected_namespaces": ()}
+     model_name: Optional[KlingCharacterEffectModelName] = 'kling-v1'
+@@ -1022,6 +1024,7 @@
+ 
+ 
+ class KlingImageGenerationsRequest(BaseModel):
++    model_config = {"protected_namespaces": ()}
+     model_name: Optional[KlingImageGenerationsModelName] = 'kling-v1'
+     prompt: str = Field(
+         ...,
+@@ -1066,6 +1069,7 @@
+ 
+ 
+ class KlingVirtualTryOnRequest(BaseModel):
++    model_config = {"protected_namespaces": ()}
+     model_name: Optional[KlingVirtualTryOnModelName] = 'kling-v1'
+     model_image: str = Field(
+         ...,
+@@ -1095,6 +1099,7 @@
+ 
+ 
+ class KlingText2VideoRequest(BaseModel):
++    model_config = {"protected_namespaces": ()}
+     model_name: Optional[KlingText2VideoModelName] = 'kling-v1'
+     prompt: str = Field(
+         ...,
+@@ -1125,6 +1130,7 @@
+ 
+ 
+ class KlingImage2VideoRequest(BaseModel):
++    model_config = {"protected_namespaces": ()}
+     model_name: Optional[KlingImage2VideoModelName] = 'kling-v1'
+     image: str = Field(
+         ...,
