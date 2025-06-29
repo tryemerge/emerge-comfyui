@@ -88,6 +88,7 @@ parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE"
 
 parser.add_argument("--oneapi-device-selector", type=str, default=None, metavar="SELECTOR_STRING", help="Sets the oneAPI device(s) this instance will use.")
 parser.add_argument("--disable-ipex-optimize", action="store_true", help="Disables ipex.optimize default when loading models with Intel's Extension for Pytorch.")
+parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")
 
 class LatentPreviewMethod(enum.Enum):
     NoPreviews = "none"
@@ -150,6 +151,7 @@ parser.add_argument("--windows-standalone-build", action="store_true", help="Win
 
 parser.add_argument("--disable-metadata", action="store_true", help="Disable saving prompt metadata in files.")
 parser.add_argument("--disable-all-custom-nodes", action="store_true", help="Disable loading all custom nodes.")
+parser.add_argument("--whitelist-custom-nodes", type=str, nargs='+', default=[], help="Specify custom node folders to load even when --disable-all-custom-nodes is enabled.")
 parser.add_argument("--disable-api-nodes", action="store_true", help="Disable loading all api nodes.")
 
 parser.add_argument("--multi-user", action="store_true", help="Enables per-user storage.")
@@ -201,6 +203,11 @@ parser.add_argument(
     default="https://api.comfy.org",
     help="Set the base URL for the ComfyUI API.  (default: https://api.comfy.org)",
 )
+
+database_default_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "user", "comfyui.db")
+)
+parser.add_argument("--database-url", type=str, default=f"sqlite:///{database_default_path}", help="Specify the database URL, e.g. for an in-memory database you can use 'sqlite:///:memory:'.")
 
 if comfy.options.args_parsing:
     args = parser.parse_args()
