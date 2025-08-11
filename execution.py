@@ -701,32 +701,8 @@ class PromptExecutor:
                     self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                     break
 
-<<<<<<< HEAD
-                # === START PROGRESS MESSAGE ADDITION ===
-                # Send progress message for each new node
-                if node_id not in executed:
-                    node = dynamic_prompt.get_node(node_id)
-                    class_type = node.get('class_type')
-                    if class_type:
-                        current_node += 1
-                        progress = int((current_node / total_nodes) * 100)
-                        self.add_message("node_executing", {
-                            "node": node_id,
-                            "prompt_id": prompt_id,
-                            "class_type": class_type,
-                            "progress": {
-                                "current": current_node,
-                                "total": total_nodes,
-                                "percentage": progress
-                            }
-                        }, broadcast=False)
-                # === END PROGRESS MESSAGE ADDITION ===
-
-                result, error, ex = execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results)
-=======
                 assert node_id is not None, "Node ID should not be None at this point"
                 result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes)
->>>>>>> upstream/master
                 self.success = result != ExecutionResult.FAILURE
                 if result == ExecutionResult.FAILURE:
                     self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
