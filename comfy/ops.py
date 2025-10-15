@@ -24,7 +24,38 @@ import comfy.float
 import comfy.rmsnorm
 import contextlib
 
+def run_every_op():
+    comfy.model_management.throw_exception_if_processing_interrupted()
+
+def scaled_dot_product_attention(q, k, v, *args, **kwargs):
+    return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
+
+
+try:
+    if torch.cuda.is_available():
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        import inspect
+        if "set_priority" in inspect.signature(sdpa_kernel).parameters:
+            SDPA_BACKEND_PRIORITY = [
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ]
+
+            SDPA_BACKEND_PRIORITY.insert(0, SDPBackend.CUDNN_ATTENTION)
+
+            def scaled_dot_product_attention(q, k, v, *args, **kwargs):
+                with sdpa_kernel(SDPA_BACKEND_PRIORITY, set_priority=True):
+                    return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
+        else:
+            logging.warning("Torch version too old to set sdpa backend priority.")
+except (ModuleNotFoundError, TypeError):
+    logging.warning("Could not set sdpa backend priority.")
+
 cast_to = comfy.model_management.cast_to #TODO: remove once no more references
+
+if torch.cuda.is_available() and torch.backends.cudnn.is_available() and PerformanceFeature.AutoTune in args.fast:
+    torch.backends.cudnn.benchmark = True
 
 def cast_to_input(weight, input, non_blocking=False, copy=True):
     return comfy.model_management.cast_to(weight, input.dtype, input.device, non_blocking=non_blocking, copy=copy)
@@ -80,6 +111,7 @@ class disable_weight_init:
             return torch.nn.functional.linear(input, weight, bias)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -94,6 +126,7 @@ class disable_weight_init:
             return self._conv_forward(input, weight, bias)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -108,6 +141,7 @@ class disable_weight_init:
             return self._conv_forward(input, weight, bias)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -122,6 +156,7 @@ class disable_weight_init:
             return self._conv_forward(input, weight, bias)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -136,6 +171,7 @@ class disable_weight_init:
             return torch.nn.functional.group_norm(input, self.num_groups, weight, bias, self.eps)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -154,6 +190,7 @@ class disable_weight_init:
             return torch.nn.functional.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -173,6 +210,7 @@ class disable_weight_init:
             # return torch.nn.functional.rms_norm(input, self.normalized_shape, weight, self.eps)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -194,6 +232,7 @@ class disable_weight_init:
                 output_padding, self.groups, self.dilation)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -215,6 +254,7 @@ class disable_weight_init:
                 output_padding, self.groups, self.dilation)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -233,6 +273,7 @@ class disable_weight_init:
             return torch.nn.functional.embedding(input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse).to(dtype=output_dtype)
 
         def forward(self, *args, **kwargs):
+            run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
@@ -336,9 +377,13 @@ class fp8_ops(manual_cast):
             return None
 
         def forward_comfy_cast_weights(self, input):
-            out = fp8_linear(self, input)
-            if out is not None:
-                return out
+            if not self.training:
+                try:
+                    out = fp8_linear(self, input)
+                    if out is not None:
+                        return out
+                except Exception as e:
+                    logging.info("Exception during fp8 op: {}".format(e))
 
             weight, bias = cast_bias_weight(self, input)
             return torch.nn.functional.linear(input, weight, bias)
@@ -383,8 +428,10 @@ def scaled_fp8_ops(fp8_matrix_mult=False, scale_input=False, override_dtype=None
                 else:
                     return weight * self.scale_weight.to(device=weight.device, dtype=weight.dtype)
 
-            def set_weight(self, weight, inplace_update=False, seed=None, **kwargs):
+            def set_weight(self, weight, inplace_update=False, seed=None, return_weight=False, **kwargs):
                 weight = comfy.float.stochastic_rounding(weight / self.scale_weight.to(device=weight.device, dtype=weight.dtype), self.weight.dtype, seed=seed)
+                if return_weight:
+                    return weight
                 if inplace_update:
                     self.weight.data.copy_(weight)
                 else:
