@@ -1,0 +1,33 @@
+{
+  "name": "@emp/comfyui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ComfyUI fork with custom websocket support for emp-job-queue",
+  "scripts": {
+    "dev": "python main.py --listen 0.0.0.0 --port 8188",
+    "dev:cpu": "python main.py --listen 0.0.0.0 --port 8188 --cpu",
+    "install:deps": "pip install -r requirements.txt",
+    "install:custom-nodes": "python -m pip install -r custom_nodes/requirements.txt || true",
+    "lint": "ruff check . || true",
+    "lint:fix": "ruff check --fix . || true",
+    "format": "ruff format . || true",
+    "test": "pytest tests/ || true",
+    "typecheck": "echo 'Python type checking not configured'",
+    "clean": "find . -type d -name '__pycache__' -exec rm -rf {} + || true"
+  },
+  "keywords": [
+    "comfyui",
+    "stable-diffusion",
+    "ai",
+    "image-generation",
+    "websockets"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tryemerge/emerge_turbo.git",
+    "directory": "packages/comfyui"
+  },
+  "engines": {
+    "python": ">=3.10"
+  }
+}

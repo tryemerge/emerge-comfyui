@@ -347,8 +347,10 @@ class ApiClient:
         """
 
         # Build full URL and merge headers
+        # NOTE: Don't use urljoin - it treats colons as URI schemes!
+        # This breaks paths like "gemini-2.5-flash:generateContent"
         relative_path = path.lstrip("/")
-        url = urljoin(self.base_url, relative_path)
+        url = f"{self.base_url.rstrip('/')}/{relative_path}"
         self._check_auth(self.auth_token, self.comfy_api_key)
 
         request_headers = self.get_headers()

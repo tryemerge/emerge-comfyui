@@ -22,6 +22,66 @@ if __name__ == "__main__":
 
 setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
 
+# Optional OpenTelemetry logging (Phase 1 - sends ALL logs to Dash0)
+# DEBUG: Check ENABLE_OTEL_LOGGING value and comparison result
+_enable_otel = os.getenv('ENABLE_OTEL_LOGGING')
+_comparison_result = _enable_otel == 'true'
+logging.info(f"[OTEL-STARTUP-DEBUG] ENABLE_OTEL_LOGGING raw value: {_enable_otel!r}")
+logging.info(f"[OTEL-STARTUP-DEBUG] Type: {type(_enable_otel)}")
+logging.info(f"[OTEL-STARTUP-DEBUG] Comparison (_enable_otel == 'true'): {_comparison_result}")
+logging.info(f"[OTEL-STARTUP-DEBUG] Will initialize OTEL: {_comparison_result}")
+
+if _comparison_result:
+    # Runtime installation of OTEL packages if not available
+    # This ensures packages are installed using the SAME Python that ComfyUI runs with
+    # Test ALL imports that otel_integration.py needs (must match exactly!)
+    try:
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+        from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+        from opentelemetry._logs import set_logger_provider
+        from opentelemetry.sdk.resources import Resource
+        otel_available = True
+    except ImportError as e:
+        otel_available = False
+        logging.warning(f"[OTEL] OpenTelemetry packages not found - installing at ComfyUI startup... (missing: {e})")
+
+        import subprocess
+        import sys
+        try:
+            subprocess.check_call([
+                sys.executable, '-m', 'pip', 'install', '--no-cache-dir',
+                'opentelemetry-api>=1.20.0',
+                'opentelemetry-sdk>=1.20.0',
+                'opentelemetry-exporter-otlp-proto-grpc>=1.20.0',
+                'opentelemetry-instrumentation-logging>=0.41b0'
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logging.info("[OTEL] ✅ OpenTelemetry packages installed successfully")
+            otel_available = True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"[OTEL] ❌ Failed to install OpenTelemetry packages: {e}")
+            otel_available = False
+
+    # Initialize OTEL logging if packages are available
+    if otel_available:
+        try:
+            from app.otel_integration import init_otel_logging
+            otel_success = init_otel_logging()
+            if otel_success:
+                logging.info("✅ OpenTelemetry logging initialized")
+        except Exception as e:
+            logging.warning(f"Failed to initialize OTEL logging: {e}")
+
+# Optional Redis log streaming (Phase 2 - patterns to Pub/Sub and Streams)
+if os.getenv('ENABLE_REDIS_LOG_STREAM') == 'true':
+    try:
+        from app.redis_log_stream import init_redis_log_stream
+        init_redis_log_stream()
+    except Exception as e:
+        logging.warning(f"Failed to initialize Redis log streaming: {e}")
+
+# Redis error stream writer is now integrated into redis_log_stream.py
+
 def apply_custom_paths():
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
@@ -176,6 +236,8 @@ def prompt_worker(q, server_instance):
         cache_type = execution.CacheType.DEPENDENCY_AWARE
 
     e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_size=args.cache_lru)
+    # Store executor on server instance so RedisLogStreamer can access job_id from extra_data
+    server_instance.prompt_executor = e
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0

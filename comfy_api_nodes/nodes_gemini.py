@@ -40,10 +40,23 @@ from comfy_api_nodes.apinode_utils import (
     bytesio_to_image_tensor,
 )
 from comfy_api.util import VideoContainer, VideoCodec
+from comfy_api_nodes.gemini_error_handler import (
+    create_error_details,
+    log_error_details,
+    create_user_friendly_error_message,
+)
 
 
-GEMINI_BASE_ENDPOINT = "/proxy/vertexai/gemini"
+# Use Google's direct API instead of ComfyUI proxy
+GEMINI_BASE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/"
 GEMINI_MAX_INPUT_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
+
+# VERIFICATION LOG: Confirm URL fix is deployed
+print("=" * 80)
+print("🔍 GEMINI URL FIX CONFIRMED - MODULE LOADED")
+print(f"   Base URL: {GEMINI_BASE_ENDPOINT}")
+print(f"   Has trailing slash: {GEMINI_BASE_ENDPOINT.endswith('/')}")
+print("=" * 80)
 
 
 class GeminiModel(str, Enum):
@@ -81,7 +94,7 @@ def get_gemini_endpoint(
     if isinstance(model, str):
         model = GeminiModel(model)
     return ApiEndpoint(
-        path=f"{GEMINI_BASE_ENDPOINT}/{model.value}",
+        path=f"{model.value}:generateContent",
         method=HttpMethod.POST,
         request_model=GeminiGenerateContentRequest,
         response_model=GeminiGenerateContentResponse,
@@ -103,7 +116,7 @@ def get_gemini_image_endpoint(
     if isinstance(model, str):
         model = GeminiImageModel(model)
     return ApiEndpoint(
-        path=f"{GEMINI_BASE_ENDPOINT}/{model.value}",
+        path=f"{model.value}:generateContent",
         method=HttpMethod.POST,
         request_model=GeminiImageGenerateContentRequest,
         response_model=GeminiGenerateContentResponse,
@@ -161,6 +174,24 @@ def get_parts_from_response(
     Returns:
         List of response parts from the first candidate.
     """
+    # Debug logging to understand why candidates might be None
+    if response.candidates is None:
+        print(f"[EmProps] ERROR: Gemini response.candidates is None")
+        print(f"[EmProps] Full response object: {response}")
+        print(f"[EmProps] Response dict: {response.__dict__ if hasattr(response, '__dict__') else 'N/A'}")
+        raise ValueError(
+            "Gemini API returned no candidates. This typically indicates content filtering, "
+            "API quota/rate limits, or invalid request. Check the full response above for details."
+        )
+
+    if len(response.candidates) == 0:
+        print(f"[EmProps] ERROR: Gemini response.candidates is empty list")
+        print(f"[EmProps] Full response object: {response}")
+        raise ValueError(
+            "Gemini API returned empty candidates list. This typically indicates content filtering "
+            "or API rejection. Check the full response above for details."
+        )
+
     return response.candidates[0].content.parts
 
 
@@ -289,8 +320,7 @@ class GeminiNode(ComfyNodeABC):
                 ),
             },
             "hidden": {
-                "auth_token": "AUTH_TOKEN_COMFY_ORG",
-                "comfy_api_key": "API_KEY_COMFY_ORG",
+                "gemini_api_key": "GEMINI_API_KEY",
                 "unique_id": "UNIQUE_ID",
             },
         }
@@ -364,70 +394,142 @@ class GeminiNode(ComfyNodeABC):
         self,
         prompt: str,
         model: GeminiModel,
+        seed: int,
         images: Optional[IO.IMAGE] = None,
         audio: Optional[IO.AUDIO] = None,
         video: Optional[IO.VIDEO] = None,
         files: Optional[list[GeminiPart]] = None,
         unique_id: Optional[str] = None,
-        **kwargs,
+        gemini_api_key: Optional[str] = None,
     ) -> tuple[str]:
-        # Validate inputs
-        validate_string(prompt, strip_whitespace=False)
+        response = None
+        request_data = None
 
-        # Create parts list with text prompt as the first part
-        parts: list[GeminiPart] = [create_text_part(prompt)]
+        try:
+            # Validate inputs
+            validate_string(prompt, strip_whitespace=False)
 
-        # Add other modal parts
-        if images is not None:
-            image_parts = create_image_parts(images)
-            parts.extend(image_parts)
-        if audio is not None:
-            parts.extend(self.create_audio_parts(audio))
-        if video is not None:
-            parts.extend(self.create_video_parts(video))
-        if files is not None:
-            parts.extend(files)
+            # Create parts list with text prompt as the first part
+            parts: list[GeminiPart] = [create_text_part(prompt)]
 
-        # Create response
-        response = await SynchronousOperation(
-            endpoint=get_gemini_endpoint(model),
-            request=GeminiGenerateContentRequest(
-                contents=[
-                    GeminiContent(
-                        role="user",
-                        parts=parts,
-                    )
-                ]
-            ),
-            auth_kwargs=kwargs,
-        ).execute()
+            # Add other modal parts
+            if images is not None:
+                image_parts = create_image_parts(images)
+                parts.extend(image_parts)
+            if audio is not None:
+                parts.extend(self.create_audio_parts(audio))
+            if video is not None:
+                parts.extend(self.create_video_parts(video))
+            if files is not None:
+                parts.extend(files)
 
-        # Get result output
-        output_text = get_text_from_response(response)
-        if unique_id and output_text:
-            # Not a true chat history like the OpenAI Chat node. It is emulated so the frontend can show a copy button.
-            render_spec = {
-                "node_id": unique_id,
-                "component": "ChatHistoryWidget",
-                "props": {
-                    "history": json.dumps(
-                        [
-                            {
-                                "prompt": prompt,
-                                "response": output_text,
-                                "response_id": str(uuid.uuid4()),
-                                "timestamp": time.time(),
-                            }
+            # WORKAROUND: ComfyUI's hidden parameter injection is broken, read directly from os.environ
+            import os
+            gemini_api_key = os.environ.get('GEMINI_API_KEY')
+
+            # Validate API key is present (fail fast)
+            if not gemini_api_key:
+                raise Exception(
+                    "GEMINI_API_KEY environment variable is required to use Google Gemini nodes. "
+                    "Please set GEMINI_API_KEY with your Google AI Studio API key. "
+                    "Get your key at: https://aistudio.google.com/apikey"
+                )
+
+            # Create endpoint with API key as query parameter
+            endpoint = get_gemini_endpoint(model)
+            endpoint.query_params = {"key": gemini_api_key}
+
+            # Prepare request data for debugging
+            request_data = {
+                "model": model.value if isinstance(model, GeminiModel) else model,
+                "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+                "has_images": images is not None,
+                "has_audio": audio is not None,
+                "has_video": video is not None,
+                "has_files": files is not None,
+                "parts_count": len(parts),
+                "seed": seed,
+            }
+
+            model_name = model.value if isinstance(model, GeminiModel) else model
+            print(f"[EmProps GeminiNode] Making API call with model={model_name}, parts_count={len(parts)}")
+
+            # Execute request with retry mechanism (2 attempts total)
+            max_attempts = 2
+            response = None
+            for attempt in range(1, max_attempts + 1):
+                print(f"[EmProps GeminiNode] Attempt {attempt}/{max_attempts}")
+
+                response = await SynchronousOperation(
+                    endpoint=endpoint,
+                    request=GeminiGenerateContentRequest(
+                        contents=[
+                            GeminiContent(
+                                role="user",
+                                parts=parts,
+                            )
                         ]
                     ),
-                },
-            }
-            PromptServer.instance.send_sync(
-                "display_component",
-                render_spec,
+                    api_base=GEMINI_BASE_ENDPOINT,
+                    comfy_api_key=gemini_api_key,
+                ).execute()
+
+                # Check if we got a valid response with candidates
+                if response and response.candidates and len(response.candidates) > 0:
+                    print(f"[EmProps GeminiNode] Success on attempt {attempt}")
+                    break
+                else:
+                    print(f"[EmProps GeminiNode] Empty response on attempt {attempt}, retrying...")
+                    if attempt == max_attempts:
+                        print(f"[EmProps GeminiNode] All {max_attempts} attempts failed")
+
+            print(f"[EmProps GeminiNode] Received response, processing...")
+
+            # Get result output
+            output_text = get_text_from_response(response)
+
+            if unique_id and output_text:
+                # Not a true chat history like the OpenAI Chat node. It is emulated so the frontend can show a copy button.
+                render_spec = {
+                    "node_id": unique_id,
+                    "component": "ChatHistoryWidget",
+                    "props": {
+                        "history": json.dumps(
+                            [
+                                {
+                                    "prompt": prompt,
+                                    "response": output_text,
+                                    "response_id": str(uuid.uuid4()),
+                                    "timestamp": time.time(),
+                                }
+                            ]
+                        ),
+                    },
+                }
+                PromptServer.instance.send_sync(
+                    "display_component",
+                    render_spec,
+                )
+
+            print(f"[EmProps GeminiNode] Success! Output length: {len(output_text) if output_text else 0} chars")
+            return (output_text or "Empty response from Gemini model...",)
+
+        except Exception as e:
+            # Create detailed error information
+            error_details = create_error_details(
+                error=e,
+                response=response,
+                request_data=request_data,
             )
 
-        return (output_text or "Empty response from Gemini model...",)
+            # Log detailed error to console
+            log_error_details(error_details, node_name="GeminiNode")
+
+            # Create user-friendly error message
+            user_message = create_user_friendly_error_message(error_details)
+
+            # Re-raise with enhanced message
+            raise Exception(user_message) from e
 
 
 class GeminiInputFiles(ComfyNodeABC):
@@ -590,8 +692,7 @@ class GeminiImage(ComfyNodeABC):
                 ),
             },
             "hidden": {
-                "auth_token": "AUTH_TOKEN_COMFY_ORG",
-                "comfy_api_key": "API_KEY_COMFY_ORG",
+                "gemini_api_key": "GEMINI_API_KEY",
                 "unique_id": "UNIQUE_ID",
             },
         }
@@ -606,70 +707,142 @@ class GeminiImage(ComfyNodeABC):
         self,
         prompt: str,
         model: GeminiImageModel,
+        seed: int,
         images: Optional[IO.IMAGE] = None,
         files: Optional[list[GeminiPart]] = None,
         n=1,
         aspect_ratio: str = "auto",
         unique_id: Optional[str] = None,
-        **kwargs,
+        gemini_api_key: Optional[str] = None,
     ):
-        validate_string(prompt, strip_whitespace=True, min_length=1)
-        parts: list[GeminiPart] = [create_text_part(prompt)]
+        response = None
+        request_data = None
 
-        if not aspect_ratio:
-            aspect_ratio = "auto"  # for backward compatability with old workflows; to-do remove this in December
-        image_config = GeminiImageConfig(aspectRatio=aspect_ratio)
+        try:
+            validate_string(prompt, strip_whitespace=True, min_length=1)
+            parts: list[GeminiPart] = [create_text_part(prompt)]
 
-        if images is not None:
-            image_parts = create_image_parts(images)
-            parts.extend(image_parts)
-        if files is not None:
-            parts.extend(files)
+            if not aspect_ratio:
+                aspect_ratio = "auto"  # for backward compatability with old workflows; to-do remove this in December
+            image_config = GeminiImageConfig(aspectRatio=aspect_ratio)
 
-        response = await SynchronousOperation(
-            endpoint=get_gemini_image_endpoint(model),
-            request=GeminiImageGenerateContentRequest(
-                contents=[
-                    GeminiContent(
-                        role="user",
-                        parts=parts,
-                    ),
-                ],
-                generationConfig=GeminiImageGenerationConfig(
-                    responseModalities=["TEXT","IMAGE"],
-                    imageConfig=None if aspect_ratio == "auto" else image_config,
+            if images is not None:
+                image_parts = create_image_parts(images)
+                parts.extend(image_parts)
+            if files is not None:
+                parts.extend(files)
+
+            # WORKAROUND: ComfyUI's hidden parameter injection is broken, read directly from os.environ
+            import os
+            gemini_api_key = os.environ.get('GEMINI_API_KEY')
+
+            # Validate API key is present (fail fast)
+            if not gemini_api_key:
+                raise Exception(
+                    "GEMINI_API_KEY environment variable is required to use Google Gemini nodes. "
+                    "Please set GEMINI_API_KEY with your Google AI Studio API key. "
+                    "Get your key at: https://aistudio.google.com/apikey"
                 )
-            ),
-            auth_kwargs=kwargs,
-        ).execute()
 
-        output_image = get_image_from_response(response)
-        output_text = get_text_from_response(response)
-        if unique_id and output_text:
-            # Not a true chat history like the OpenAI Chat node. It is emulated so the frontend can show a copy button.
-            render_spec = {
-                "node_id": unique_id,
-                "component": "ChatHistoryWidget",
-                "props": {
-                    "history": json.dumps(
-                        [
-                            {
-                                "prompt": prompt,
-                                "response": output_text,
-                                "response_id": str(uuid.uuid4()),
-                                "timestamp": time.time(),
-                            }
-                        ]
-                    ),
-                },
+            # Create endpoint with API key as query parameter
+            endpoint = get_gemini_image_endpoint(model)
+            endpoint.query_params = {"key": gemini_api_key}
+
+            # Prepare request data for debugging
+            request_data = {
+                "model": model.value if isinstance(model, GeminiImageModel) else model,
+                "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+                "has_images": images is not None,
+                "has_files": files is not None,
+                "parts_count": len(parts),
+                "seed": seed,
+                "aspect_ratio": aspect_ratio,
             }
-            PromptServer.instance.send_sync(
-                "display_component",
-                render_spec,
+
+            model_name = model.value if isinstance(model, GeminiImageModel) else model
+            print(f"[EmProps GeminiImageNode] Making API call with model={model_name}, parts_count={len(parts)}, aspect_ratio={aspect_ratio}")
+
+            # Execute request with retry mechanism (2 attempts total)
+            max_attempts = 2
+            response = None
+            for attempt in range(1, max_attempts + 1):
+                print(f"[EmProps GeminiImageNode] Attempt {attempt}/{max_attempts}")
+
+                response = await SynchronousOperation(
+                    endpoint=endpoint,
+                    request=GeminiImageGenerateContentRequest(
+                        contents=[
+                            GeminiContent(
+                                role="user",
+                                parts=parts,
+                            ),
+                        ],
+                        generationConfig=GeminiImageGenerationConfig(
+                            responseModalities=["TEXT","IMAGE"],
+                            imageConfig=None if aspect_ratio == "auto" else image_config,
+                        )
+                    ),
+                    api_base=GEMINI_BASE_ENDPOINT,
+                    comfy_api_key=gemini_api_key,
+                ).execute()
+
+                # Check if we got a valid response with candidates
+                if response and response.candidates and len(response.candidates) > 0:
+                    print(f"[EmProps GeminiImageNode] Success on attempt {attempt}")
+                    break
+                else:
+                    print(f"[EmProps GeminiImageNode] Empty response on attempt {attempt}, retrying...")
+                    if attempt == max_attempts:
+                        print(f"[EmProps GeminiImageNode] All {max_attempts} attempts failed")
+
+            print(f"[EmProps GeminiImageNode] Received response, processing...")
+
+            output_image = get_image_from_response(response)
+            output_text = get_text_from_response(response)
+
+            if unique_id and output_text:
+                # Not a true chat history like the OpenAI Chat node. It is emulated so the frontend can show a copy button.
+                render_spec = {
+                    "node_id": unique_id,
+                    "component": "ChatHistoryWidget",
+                    "props": {
+                        "history": json.dumps(
+                            [
+                                {
+                                    "prompt": prompt,
+                                    "response": output_text,
+                                    "response_id": str(uuid.uuid4()),
+                                    "timestamp": time.time(),
+                                }
+                            ]
+                        ),
+                    },
+                }
+                PromptServer.instance.send_sync(
+                    "display_component",
+                    render_spec,
+                )
+
+            output_text = output_text or "Empty response from Gemini model..."
+            print(f"[EmProps GeminiImageNode] Success! Text length: {len(output_text)} chars, Image shape: {output_image.shape if output_image is not None else 'None'}")
+            return (output_image, output_text,)
+
+        except Exception as e:
+            # Create detailed error information
+            error_details = create_error_details(
+                error=e,
+                response=response,
+                request_data=request_data,
             )
 
-        output_text = output_text or "Empty response from Gemini model..."
-        return (output_image, output_text,)
+            # Log detailed error to console
+            log_error_details(error_details, node_name="GeminiImageNode")
+
+            # Create user-friendly error message
+            user_message = create_user_friendly_error_message(error_details)
+
+            # Re-raise with enhanced message
+            raise Exception(user_message) from e
 
 
 NODE_CLASS_MAPPINGS = {

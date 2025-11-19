@@ -35,6 +35,14 @@ from comfy_execution.utils import CurrentNodeContext
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io
 
+# EmProps: Import validation error stream publisher for Redis-based error pattern matching
+try:
+    from emprops_comfy_nodes.utils.validation_stream_publisher import publish_validation_errors
+    VALIDATION_STREAM_AVAILABLE = True
+except ImportError:
+    VALIDATION_STREAM_AVAILABLE = False
+    logging.info("[EmProps] Validation stream publisher not available, validation errors will not be published to Redis")
+
 
 class ExecutionResult(Enum):
     SUCCESS = 0
@@ -384,13 +392,114 @@ def get_output_from_returns(return_values, obj):
         ui = {k: [y for x in uis for y in x[k]] for k in uis[0].keys()}
     return output, ui, has_subgraph
 
-def format_value(x):
+def format_value_safe(x, max_depth=3, current_depth=0, max_items=10, max_attrs=5):
+    """
+    Safely format a value for JSON serialization, preventing '[object Object]' errors.
+
+    This function handles complex Python objects (dicts, lists, tuples, custom objects)
+    and converts them to JSON-serializable dictionaries with proper type information.
+
+    Args:
+        x: The value to format
+        max_depth: Maximum recursion depth (default: 3)
+        current_depth: Current recursion depth (internal use)
+        max_items: Maximum number of items to include from collections (default: 10)
+        max_attrs: Maximum number of attributes to include from objects (default: 5)
+
+    Returns:
+        JSON-serializable representation of the value
+
+    Examples:
+        >>> format_value_safe({"a": 1, "b": 2})
+        {"a": 1, "b": 2}
+
+        >>> format_value_safe([1, 2, 3, 4])
+        [1, 2, 3, 4]
+
+        >>> class MyObject:
+        ...     def __init__(self):
+        ...         self.value = 42
+        >>> format_value_safe(MyObject())
+        {"__type__": "MyObject", "value": 42}
+    """
+    # Base case: None
     if x is None:
         return None
-    elif isinstance(x, (int, float, bool, str)):
+
+    # Base case: JSON-serializable primitives
+    if isinstance(x, (int, float, bool, str)):
         return x
-    else:
-        return str(x)
+
+    # Depth limit reached - return type info only
+    if current_depth >= max_depth:
+        return f"<{type(x).__name__} (max depth reached)>"
+
+    # Handle dictionaries
+    if isinstance(x, dict):
+        result = {}
+        for i, (k, v) in enumerate(x.items()):
+            if i >= max_items:
+                result["__truncated__"] = f"... {len(x) - max_items} more items"
+                break
+            # Ensure key is a string
+            key_str = str(k) if not isinstance(k, str) else k
+            result[key_str] = format_value_safe(v, max_depth, current_depth + 1, max_items, max_attrs)
+        return result
+
+    # Handle lists
+    if isinstance(x, list):
+        result = []
+        for i, item in enumerate(x):
+            if i >= max_items:
+                result.append(f"... {len(x) - max_items} more items")
+                break
+            result.append(format_value_safe(item, max_depth, current_depth + 1, max_items, max_attrs))
+        return result
+
+    # Handle tuples (convert to list for JSON compatibility)
+    if isinstance(x, tuple):
+        result = []
+        for i, item in enumerate(x):
+            if i >= max_items:
+                result.append(f"... {len(x) - max_items} more items")
+                break
+            result.append(format_value_safe(item, max_depth, current_depth + 1, max_items, max_attrs))
+        return result
+
+    # Handle custom objects
+    try:
+        result = {
+            "__type__": type(x).__name__,
+        }
+
+        # Try to get object attributes
+        attrs = {}
+        if hasattr(x, '__dict__'):
+            attrs = x.__dict__
+        elif hasattr(x, '__slots__'):
+            attrs = {slot: getattr(x, slot, None) for slot in x.__slots__}
+
+        # Add attributes to result (limit to max_attrs)
+        for i, (k, v) in enumerate(attrs.items()):
+            if i >= max_attrs:
+                result["__truncated__"] = f"... {len(attrs) - max_attrs} more attributes"
+                break
+            # Skip private attributes
+            if not k.startswith('_'):
+                result[k] = format_value_safe(v, max_depth, current_depth + 1, max_items, max_attrs)
+
+        return result
+    except Exception as e:
+        # Final fallback - return a safe string representation
+        return f"<{type(x).__name__}: {str(e)}>"
+
+# Maintain backward compatibility alias
+def format_value(x):
+    """
+    Legacy function name for backward compatibility.
+    Uses format_value_safe() internally.
+    """
+    return format_value_safe(x)
 
 async def execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes):
     unique_id = current_item
@@ -557,9 +666,32 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
     except comfy.model_management.InterruptProcessingException as iex:
         logging.info("Processing interrupted")
 
-        # skip formatting inputs/outputs
+        # Classify the interruption as structured error
+        structured_error = StructuredError(
+            code=ErrorCode.SYSTEM_INTERRUPTED,
+            message="Processing was interrupted by user",
+            node_id=real_node_id,
+            node_type=class_type,
+            suggestion=None,
+            metadata={}
+        )
+
+        # Convert to dict for serialization
+        structured_error_dict = structured_error.to_dict()
+
+        # Build error_details with structured fields
         error_details = {
+            # Legacy fields
             "node_id": real_node_id,
+
+            # New structured error fields
+            "error_code": structured_error_dict["error_code"],
+            "node_type": structured_error_dict["node_type"],
+            "suggestion": structured_error_dict["suggestion"],
+            "metadata": structured_error_dict["metadata"],
+
+            # Full structured error
+            "structured_error": structured_error_dict
         }
 
         return (ExecutionResult.FAILURE, error_details, iex)
@@ -574,19 +706,22 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
 
         logging.error(f"!!! Exception during processing !!! {ex}")
         logging.error(traceback.format_exc())
-        tips = ""
 
-        if isinstance(ex, comfy.model_management.OOM_EXCEPTION):
-            tips = "This error means you ran out of memory on your GPU.\n\nTIPS: If the workflow worked before you might have accidentally set the batch_size to a large number."
+        # Handle GPU OOM specifically (ComfyUI-specific optimization)
+        # This is kept because it's a ComfyUI performance optimization, not error classification
+        if "cuda out of memory" in str(ex).lower():
             logging.error("Got an OOM, unloading all loaded models.")
             comfy.model_management.unload_all_models()
 
+        # Send RAW exception info only (no classification)
+        # Classification happens in TypeScript via ComfyUIErrorEnhancer
         error_details = {
             "node_id": real_node_id,
-            "exception_message": "{}\n{}".format(ex, tips),
+            "node_type": class_type,
+            "exception_message": str(ex),
             "exception_type": exception_type,
             "traceback": traceback.format_tb(tb),
-            "current_inputs": input_data_formatted
+            "current_inputs": input_data_formatted,
         }
 
         return (ExecutionResult.FAILURE, error_details, ex)
@@ -655,6 +790,10 @@ class PromptExecutor:
             self.server.client_id = extra_data["client_id"]
         else:
             self.server.client_id = None
+
+        # Store extra_data for the duration of this execution
+        # This allows RedisLogStreamer to access job_id for proper stream routing
+        self.extra_data = extra_data
 
         self.status_messages = []
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
@@ -1083,6 +1222,14 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                             logging.error(f"  - {reason['message']}: {reason['details']}")
                     node_errors[node_id]["dependent_outputs"].append(o)
             logging.error("Output will be ignored")
+
+    # EmProps: Publish validation errors to Redis stream for immediate detection
+    # This allows the worker to classify and handle validation errors without waiting for timeout
+    if len(node_errors) > 0 and VALIDATION_STREAM_AVAILABLE:
+        try:
+            publish_validation_errors(prompt_id, node_errors, prompt)
+        except Exception as e:
+            logging.error(f"[EmProps] Failed to publish validation errors to Redis: {e}")
 
     if len(good_outputs) == 0:
         errors_list = []

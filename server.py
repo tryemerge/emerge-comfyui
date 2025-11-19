@@ -722,13 +722,20 @@ class PromptServer():
                 if "partial_execution_targets" in json_data:
                     partial_execution_targets = json_data["partial_execution_targets"]
 
-                valid = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets)
+                # Extract extra_data BEFORE validation so RedisLogStreamer can access job_id during validation errors
                 extra_data = {}
                 if "extra_data" in json_data:
                     extra_data = json_data["extra_data"]
 
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
+
+                # Store current_extra_data on server instance for access during validation
+                # This allows RedisLogStreamer to get job_id even during validation failures
+                self.current_extra_data = extra_data
+                logging.info(f"META: [Server] Stored current_extra_data with job_id={extra_data.get('job_id')}")
+
+                valid = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets)
                 if valid[0]:
                     outputs_to_execute = valid[2]
                     self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute))
