@@ -12,6 +12,42 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+def _make_serializable(obj: Any) -> Any:
+    """
+    Recursively convert objects to JSON-serializable format
+
+    Args:
+        obj: Object to convert
+
+    Returns:
+        JSON-serializable version of the object
+    """
+    if obj is None:
+        return None
+    elif isinstance(obj, (str, int, float, bool)):
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _make_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_make_serializable(item) for item in obj]
+    elif hasattr(obj, 'model_dump'):
+        # Pydantic model
+        try:
+            return obj.model_dump(mode='json')
+        except Exception:
+            return str(obj)
+    elif hasattr(obj, 'dict'):
+        # Older Pydantic model
+        try:
+            return obj.dict()
+        except Exception:
+            return str(obj)
+    elif hasattr(obj, '__dict__'):
+        return _make_serializable(obj.__dict__)
+    else:
+        return str(obj)
+
+
 class GeminiErrorDetails(BaseModel):
     """Structured error information for debugging"""
     timestamp: str
@@ -89,14 +125,19 @@ def create_error_details(
     gemini_response = None
     if response:
         try:
-            if hasattr(response, '__dict__'):
-                gemini_response = response.__dict__
-            elif hasattr(response, 'model_dump'):
-                gemini_response = response.model_dump()
+            # Try Pydantic's model_dump first (handles nested models properly)
+            if hasattr(response, 'model_dump'):
+                gemini_response = response.model_dump(mode='json')
+            elif hasattr(response, 'dict'):
+                # Fallback for older Pydantic versions
+                gemini_response = response.dict()
+            elif hasattr(response, '__dict__'):
+                # Last resort: convert to dict and stringify non-serializable objects
+                gemini_response = _make_serializable(response.__dict__)
             else:
                 gemini_response = {"raw": str(response)}
         except Exception as e:
-            gemini_response = {"extraction_error": str(e)}
+            gemini_response = {"extraction_error": str(e), "response_type": type(response).__name__}
 
     # Generate suggestions based on error patterns
     suggestions = generate_suggestions(error_type, error_message, gemini_response)
