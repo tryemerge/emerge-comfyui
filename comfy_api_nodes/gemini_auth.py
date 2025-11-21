@@ -21,8 +21,27 @@ GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'
 
 
 def is_vertex_ai_configured() -> bool:
-    """Check if Vertex AI credentials are configured."""
-    return bool(GOOGLE_APPLICATION_CREDENTIALS and GCP_PROJECT_ID)
+    """
+    Check if Vertex AI credentials are configured.
+
+    Returns True if:
+    - GCP_PROJECT_ID is set AND
+    - Either GOOGLE_APPLICATION_CREDENTIALS is set OR gcloud auth is configured
+    """
+    if not GCP_PROJECT_ID:
+        return False
+
+    # If explicit credentials file is set, we're good
+    if GOOGLE_APPLICATION_CREDENTIALS:
+        return True
+
+    # Check if gcloud Application Default Credentials are available
+    try:
+        import google.auth
+        credentials, project = google.auth.default()
+        return True
+    except Exception:
+        return False
 
 
 def is_ai_studio_configured() -> bool:
@@ -57,23 +76,32 @@ def get_auth_backend() -> str:
 
 def get_vertex_ai_access_token() -> str:
     """
-    Get OAuth2 access token for Vertex AI using service account credentials.
+    Get OAuth2 access token for Vertex AI using available credentials.
+
+    Supports multiple authentication methods:
+    1. Service account key file (if GOOGLE_APPLICATION_CREDENTIALS is set)
+    2. Workload Identity Federation config file
+    3. Application Default Credentials (gcloud auth application-default login)
+    4. Compute Engine/GKE metadata service (when running on GCP)
 
     Returns:
         Bearer token string
     """
     try:
         from google.auth.transport.requests import Request
-        from google.oauth2 import service_account
+        import google.auth
     except ImportError:
         raise ImportError(
             "google-auth library not installed. Install it with:\n"
             "pip install google-auth"
         )
 
-    # Load service account credentials
-    credentials = service_account.Credentials.from_service_account_file(
-        GOOGLE_APPLICATION_CREDENTIALS,
+    # Use Application Default Credentials (ADC) - automatically handles:
+    # - Service account keys
+    # - Workload Identity Federation
+    # - gcloud user credentials
+    # - GCE/GKE metadata service
+    credentials, project = google.auth.default(
         scopes=['https://www.googleapis.com/auth/cloud-platform']
     )
 
