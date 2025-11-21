@@ -28,6 +28,9 @@ opentelemetry-sdk>=1.20.0
 opentelemetry-exporter-otlp-proto-grpc>=1.20.0
 opentelemetry-instrumentation-logging>=0.41b0
 
+# Google Cloud Vertex AI
+google-auth>=2.23.0
+
 #non essential dependencies:
 kornia>=0.7.1
 spandrel

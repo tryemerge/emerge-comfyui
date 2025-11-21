@@ -44,20 +44,18 @@ from comfy_api_nodes.gemini_error_handler import (
     log_error_details,
     create_user_friendly_error_message,
 )
+from comfy_api_nodes.gemini_auth import get_gemini_endpoint, get_auth_backend
 from server import PromptServer
 
-# Direct Gemini API endpoint (not proxied through api.comfy.org)
-GEMINI_BASE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models"
+# Constants
 GEMINI_MAX_INPUT_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
-# Get API key from environment variable
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-if not GEMINI_API_KEY:
-    raise ValueError(
-        "GEMINI_API_KEY environment variable is required to use Google Gemini nodes. "
-        "Please set GEMINI_API_KEY with your Google AI Studio API key. "
-        "Get your key at: https://aistudio.google.com/apikey"
-    )
+# Validate authentication is configured (will raise ValueError if not)
+try:
+    auth_backend = get_auth_backend()
+    print(f"[EmProps Gemini] Authentication backend: {auth_backend}")
+except ValueError as e:
+    raise ValueError(str(e))
 
 
 class GeminiModel(str, Enum):
@@ -314,15 +312,12 @@ class GeminiNode(IO.ComfyNode):
         if files is not None:
             parts.extend(files)
 
-        # Create response using direct Gemini API with API key
+        # Create response using configured Gemini backend (AI Studio or Vertex AI)
         model_name = model.value if isinstance(model, GeminiModel) else model
         print(f"[EmProps GeminiNode] Making API call with model={model_name}, parts_count={len(parts)}")
 
-        endpoint = ApiEndpoint(
-            path=f"{GEMINI_BASE_ENDPOINT}/{model}:generateContent",
-            method="POST"
-        )
-        endpoint.query_params = {"key": GEMINI_API_KEY}
+        # Get endpoint with authentication configured
+        endpoint = get_gemini_endpoint(model, "generateContent")
 
         request_data = GeminiGenerateContentRequest(
             contents=[
@@ -579,11 +574,8 @@ class GeminiImage(IO.ComfyNode):
         model_name = model.value if isinstance(model, GeminiImageModel) else model
         print(f"[EmProps GeminiImageNode] Making API call with model={model_name}, parts_count={len(parts)}, aspect_ratio={aspect_ratio}")
 
-        endpoint = ApiEndpoint(
-            path=f"{GEMINI_BASE_ENDPOINT}/{model}:generateContent",
-            method="POST"
-        )
-        endpoint.query_params = {"key": GEMINI_API_KEY}
+        # Get endpoint with authentication configured
+        endpoint = get_gemini_endpoint(model, "generateContent")
 
         request_data = GeminiImageGenerateContentRequest(
             contents=[
