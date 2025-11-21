@@ -153,6 +153,44 @@ def get_gemini_endpoint(model: str, action: str = "generateContent") -> ApiEndpo
     return endpoint
 
 
+def get_veo_endpoint(model: str, action: str = "predictLongRunning") -> ApiEndpoint:
+    """
+    Create an ApiEndpoint configured for Vertex AI Veo video generation.
+
+    Args:
+        model: Model name (e.g., "veo-3.0-generate-001")
+        action: API action (e.g., "predictLongRunning", "fetchPredictOperation")
+
+    Returns:
+        Configured ApiEndpoint with authentication
+
+    Raises:
+        ValueError: If Vertex AI is not configured
+    """
+    if not is_vertex_ai_configured():
+        raise ValueError(
+            "Vertex AI not configured for Veo. Please set:\n"
+            "  - GOOGLE_APPLICATION_CREDENTIALS (path to service account key)\n"
+            "  - GCP_PROJECT_ID (your GCP project ID)\n"
+            "  - GCP_REGION (optional, defaults to us-central1)"
+        )
+
+    # Vertex AI Veo endpoint format:
+    # https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:{action}
+    path = (
+        f"https://{GCP_REGION}-aiplatform.googleapis.com/v1/"
+        f"projects/{GCP_PROJECT_ID}/locations/{GCP_REGION}/"
+        f"publishers/google/models/{model}:{action}"
+    )
+    endpoint = ApiEndpoint(path=path, method="POST")
+
+    # Get OAuth2 token for Vertex AI
+    access_token = get_vertex_ai_access_token()
+    endpoint.headers = {"Authorization": f"Bearer {access_token}"}
+
+    return endpoint
+
+
 def get_auth_info() -> dict:
     """
     Get information about current authentication configuration.
