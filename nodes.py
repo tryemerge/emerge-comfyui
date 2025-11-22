@@ -2353,6 +2353,8 @@ async def init_builtin_api_nodes():
         "nodes_openai.py",
         "nodes_minimax.py",
         "nodes_veo2.py",
+        "nodes_veo_vertex.py",
+        "nodes_veo_aistudio.py",
         "nodes_kling.py",
         "nodes_bfl.py",
         "nodes_bytedance.py",

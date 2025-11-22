@@ -12,6 +12,7 @@ from enum import Enum
 from io import BytesIO
 from typing import Literal
 
+import aiohttp
 import torch
 from typing_extensions import override
 
@@ -25,6 +26,7 @@ from comfy_api_nodes.apis.gemini_api import (
     GeminiImageConfig,
     GeminiImageGenerateContentRequest,
     GeminiImageGenerationConfig,
+    GeminiImageOutputOptions,
     GeminiInlineData,
     GeminiMimeType,
     GeminiPart,
@@ -46,7 +48,7 @@ from comfy_api_nodes.gemini_error_handler import (
     log_error_details,
     create_user_friendly_error_message,
 )
-from comfy_api_nodes.gemini_auth import get_gemini_endpoint, get_auth_backend
+from comfy_api_nodes.gemini_auth import get_gemini_endpoint, get_auth_backend, GEMINI_API_KEY, GOOGLE_CLOUD_API_KEY, is_ai_studio_configured
 from server import PromptServer
 
 # Constants
@@ -152,7 +154,10 @@ def get_text_from_response(response: GeminiGenerateContentResponse) -> str:
 
 def get_image_from_response(response: GeminiGenerateContentResponse) -> torch.Tensor:
     image_tensors: list[torch.Tensor] = []
+    # Try PNG first, then JPEG (AI Studio may return JPEG)
     parts = get_parts_by_type(response, "image/png")
+    if not parts:
+        parts = get_parts_by_type(response, "image/jpeg")
     for part in parts:
         image_data = base64.b64decode(part.inlineData.data)
         returned_image = bytesio_to_image_tensor(BytesIO(image_data))
@@ -189,6 +194,11 @@ def calculate_tokens_price(response: GeminiGenerateContentResponse) -> float | N
         output_text_tokens_price = 12.0
         output_image_tokens_price = 0.0
     elif response.modelVersion == "gemini-3-pro-image-preview":
+        # Nano Banana 2 pricing (preview)
+        input_tokens_price = 2
+        output_text_tokens_price = 12.0
+        output_image_tokens_price = 120.0
+    elif response.modelVersion == "gemini-2.5-flash-image":
         input_tokens_price = 2
         output_text_tokens_price = 12.0
         output_image_tokens_price = 120.0
@@ -713,6 +723,12 @@ class GeminiImage(IO.ComfyNode):
 
 
 class GeminiImage2(IO.ComfyNode):
+    """
+    Generates or edits images using Google's Gemini API via direct HTTP calls.
+
+    Bypasses ComfyUI's proxy for direct API access using GEMINI_API_KEY.
+    Requires GEMINI_API_KEY environment variable.
+    """
 
     @classmethod
     def define_schema(cls):
@@ -720,7 +736,7 @@ class GeminiImage2(IO.ComfyNode):
             node_id="GeminiImage2Node",
             display_name="Nano Banana Pro (Google Gemini Image)",
             category="api node/image/Gemini",
-            description="Generate or edit images synchronously via Google Vertex API.",
+            description="Generate or edit images synchronously via Google Vertex API (requires GEMINI_API_KEY)",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -731,7 +747,8 @@ class GeminiImage2(IO.ComfyNode):
                 ),
                 IO.Combo.Input(
                     "model",
-                    options=["gemini-3-pro-image-preview"],
+                    options=["gemini-3-pro-image-preview", "gemini-2.5-flash-image"],
+                    default="gemini-3-pro-image-preview",
                 ),
                 IO.Int.Input(
                     "seed",
@@ -781,11 +798,8 @@ class GeminiImage2(IO.ComfyNode):
                 IO.String.Output(),
             ],
             hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
                 IO.Hidden.unique_id,
             ],
-            is_api_node=True,
         )
 
     @classmethod
@@ -800,6 +814,29 @@ class GeminiImage2(IO.ComfyNode):
         images: torch.Tensor | None = None,
         files: list[GeminiPart] | None = None,
     ) -> IO.NodeOutput:
+        # Determine which API key and endpoint to use
+        # Priority: GOOGLE_CLOUD_API_KEY (Vertex AI Express Mode) > GEMINI_API_KEY (AI Studio)
+        if GOOGLE_CLOUD_API_KEY:
+            api_key = GOOGLE_CLOUD_API_KEY
+            # Vertex AI Express Mode endpoint - supports imageOutputOptions
+            api_url = f"https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
+            use_express_mode = True
+            print(f"[EmProps GeminiImage2] Using Vertex AI Express Mode with GOOGLE_CLOUD_API_KEY")
+        elif GEMINI_API_KEY:
+            api_key = GEMINI_API_KEY
+            # AI Studio endpoint - limited imageConfig support
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            use_express_mode = False
+            print(f"[EmProps GeminiImage2] Using AI Studio with GEMINI_API_KEY")
+        else:
+            raise ValueError(
+                "No API key configured. Please set one of:\n"
+                "  - GOOGLE_CLOUD_API_KEY (for Vertex AI Express Mode - recommended for gemini-3-pro-image-preview)\n"
+                "  - GEMINI_API_KEY (for AI Studio)\n"
+                "\n"
+                "Get API key at: https://aistudio.google.com/apikey"
+            )
+
         validate_string(prompt, strip_whitespace=True, min_length=1)
 
         parts: list[GeminiPart] = [GeminiPart(text=prompt)]
@@ -810,25 +847,67 @@ class GeminiImage2(IO.ComfyNode):
         if files is not None:
             parts.extend(files)
 
-        image_config = GeminiImageConfig(imageSize=resolution)
+        # Build imageConfig - Express Mode supports more options
+        if use_express_mode:
+            image_config = GeminiImageConfig(
+                imageSize=resolution,
+                imageOutputOptions=GeminiImageOutputOptions(mimeType="image/png"),
+            )
+        else:
+            # AI Studio has limited imageConfig support - no imageOutputOptions
+            image_config = GeminiImageConfig(
+                imageSize=resolution,
+            )
         if aspect_ratio != "auto":
             image_config.aspectRatio = aspect_ratio
 
-        response = await sync_op(
-            cls,
-            ApiEndpoint(path=f"{GEMINI_BASE_ENDPOINT}/{model}", method="POST"),
-            data=GeminiImageGenerateContentRequest(
-                contents=[
-                    GeminiContent(role=GeminiRole.user, parts=parts),
-                ],
-                generationConfig=GeminiImageGenerationConfig(
-                    responseModalities=(["IMAGE"] if response_modalities == "IMAGE" else ["TEXT", "IMAGE"]),
-                    imageConfig=image_config,
-                ),
+        # Build request payload
+        request_data = GeminiImageGenerateContentRequest(
+            contents=[
+                GeminiContent(role=GeminiRole.user, parts=parts),
+            ],
+            generationConfig=GeminiImageGenerationConfig(
+                responseModalities=(["IMAGE"] if response_modalities == "IMAGE" else ["TEXT", "IMAGE"]),
+                imageConfig=image_config,
             ),
-            response_model=GeminiGenerateContentResponse,
-            price_extractor=calculate_tokens_price,
         )
+
+        print(f"[EmProps GeminiImage2] Calling API: {api_url}")
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url,
+                json=request_data.model_dump(exclude_none=True),
+                headers=headers,
+                params={"key": api_key},
+            ) as http_response:
+                if http_response.status != 200:
+                    error_text = await http_response.text()
+                    raise Exception(f"Gemini API error (status {http_response.status}): {error_text}")
+
+                response_json = await http_response.json()
+
+        # Parse response using pydantic model
+        response = GeminiGenerateContentResponse(**response_json)
+
+        # Debug logging for response
+        print(f"[EmProps GeminiImage2] Response received")
+        if response.candidates:
+            print(f"[EmProps GeminiImage2] Candidates count: {len(response.candidates)}")
+            for i, candidate in enumerate(response.candidates):
+                if candidate.content and candidate.content.parts:
+                    print(f"[EmProps GeminiImage2] Candidate {i} parts count: {len(candidate.content.parts)}")
+                    for j, part in enumerate(candidate.content.parts):
+                        if hasattr(part, 'text') and part.text:
+                            print(f"[EmProps GeminiImage2] Part {j}: text (len={len(part.text)})")
+                        if hasattr(part, 'inlineData') and part.inlineData:
+                            print(f"[EmProps GeminiImage2] Part {j}: inlineData mimeType={part.inlineData.mimeType}")
+        else:
+            print(f"[EmProps GeminiImage2] No candidates in response")
 
         output_text = get_text_from_response(response)
         if output_text:

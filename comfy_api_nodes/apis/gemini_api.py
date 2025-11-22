@@ -118,9 +118,15 @@ class GeminiGenerationConfig(BaseModel):
     topP: float | None = Field(0.95, ge=0.0, le=1.0)
 
 
+class GeminiImageOutputOptions(BaseModel):
+    mimeType: str | None = Field(None)  # "image/png" or "image/jpeg"
+
+
 class GeminiImageConfig(BaseModel):
     aspectRatio: str | None = Field(None)
     imageSize: str | None = Field(None)
+    imageOutputOptions: GeminiImageOutputOptions | None = Field(None)
+    personGeneration: str | None = Field(None)  # "ALLOW_ALL", "ALLOW_ADULT", "DONT_ALLOW"
 
 
 class GeminiImageGenerationConfig(GeminiGenerationConfig):

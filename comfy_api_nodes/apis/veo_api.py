@@ -24,8 +24,13 @@ class Instance1(BaseModel):
 
 
 class PersonGeneration1(str, Enum):
+    # Vertex AI values
     ALLOW = 'ALLOW'
     BLOCK = 'BLOCK'
+    # AI Studio values
+    allow_all = 'allow_all'
+    allow_adult = 'allow_adult'
+    dont_allow = 'dont_allow'
 
 
 class Parameters1(BaseModel):

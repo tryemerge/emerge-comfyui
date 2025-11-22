@@ -1,8 +1,8 @@
 """
-Vertex AI Veo Video Generation Nodes
+Veo Video Generation Nodes (Vertex AI Direct API Access)
 
-Direct access to Google's Veo API via Vertex AI, bypassing ComfyUI's proxy.
-Uses service account credentials from GOOGLE_APPLICATION_CREDENTIALS.
+Uses Vertex AI backend with GCP service account credentials.
+Bypasses ComfyUI's proxy for direct API access.
 """
 
 import base64
@@ -19,13 +19,17 @@ from comfy_api_nodes.apis.veo_api import (
     VeoGenVidResponse,
 )
 from comfy_api_nodes.util import (
-    ApiEndpoint,
     download_url_to_video_output,
     poll_op,
     sync_op,
     tensor_to_base64_string,
 )
-from comfy_api_nodes.gemini_auth import get_veo_endpoint, is_vertex_ai_configured, GCP_PROJECT_ID, GCP_REGION
+from comfy_api_nodes.gemini_auth import (
+    get_veo_endpoint,
+    is_vertex_ai_configured,
+    GCP_PROJECT_ID,
+    GCP_REGION,
+)
 
 AVERAGE_DURATION_VIDEO_GEN = 32
 
@@ -38,19 +42,21 @@ MODELS_MAP = {
     "veo-3.0-fast-generate-001": "veo-3.0-fast-generate-001",
 }
 
-# Check if Vertex AI is configured at module load
+# Log configuration status at module load
 if is_vertex_ai_configured():
-    print(f"[EmProps Veo] Vertex AI configured (project={GCP_PROJECT_ID}, region={GCP_REGION})")
+    print(f"[EmProps Veo Vertex] Vertex AI configured (project={GCP_PROJECT_ID}, region={GCP_REGION})")
 else:
-    print("[EmProps Veo] Vertex AI not configured - Veo nodes will not be available")
+    print("[EmProps Veo Vertex] Vertex AI not configured - set GCP_PROJECT_ID and credentials")
 
 
 class VeoVertexVideoGenerationNode(IO.ComfyNode):
     """
-    Generates videos from text prompts using Google's Veo API via Vertex AI.
+    Generates videos from text prompts using Google's Veo 2 API via Vertex AI.
 
-    This node bypasses ComfyUI's proxy and connects directly to Vertex AI
-    using your service account credentials.
+    Requires GCP service account credentials configured via:
+    - GOOGLE_APPLICATION_CREDENTIALS (path to service account key)
+    - GCP_PROJECT_ID (your GCP project ID)
+    - GCP_REGION (optional, defaults to us-central1)
     """
 
     @classmethod
@@ -59,7 +65,7 @@ class VeoVertexVideoGenerationNode(IO.ComfyNode):
             node_id="VeoVertexVideoGenerationNode",
             display_name="Veo 2 Video (Vertex AI)",
             category="api node/video/Veo",
-            description="Generates videos using Google's Veo 2 API via Vertex AI (direct access)",
+            description="Generates videos using Google's Veo 2 API via Vertex AI (requires GCP credentials)",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -150,8 +156,8 @@ class VeoVertexVideoGenerationNode(IO.ComfyNode):
         model="veo-2.0-generate-001",
         generate_audio=False,
     ):
-        model = MODELS_MAP.get(model, model)
-        print(f"[EmProps Veo] Generating video with model={model}")
+        model_id = MODELS_MAP.get(model, model)
+        print(f"[EmProps Veo Vertex] Generating video with model={model_id}")
 
         # Prepare the instances for the request
         instances = []
@@ -165,12 +171,11 @@ class VeoVertexVideoGenerationNode(IO.ComfyNode):
 
         instances.append(instance)
 
-        # Create parameters dictionary
+        # Create parameters dictionary for Vertex AI
         parameters = {
             "aspectRatio": aspect_ratio,
-            "personGeneration": person_generation,
             "durationSeconds": duration_seconds,
-            "enhancePrompt": enhance_prompt,
+            "personGeneration": person_generation,
         }
 
         # Add optional parameters if provided
@@ -178,13 +183,17 @@ class VeoVertexVideoGenerationNode(IO.ComfyNode):
             parameters["negativePrompt"] = negative_prompt
         if seed > 0:
             parameters["seed"] = seed
-        # Only add generateAudio for Veo 3 models
-        if model.find("veo-2.0") == -1:
+
+        # Veo 2 supports enhancePrompt on Vertex AI
+        if model_id.find("veo-2.0") != -1:
+            parameters["enhancePrompt"] = enhance_prompt
+        # Veo 3 supports generateAudio on Vertex AI
+        else:
             parameters["generateAudio"] = generate_audio
 
-        # Get Vertex AI endpoint for video generation
-        generate_endpoint = get_veo_endpoint(model, "predictLongRunning")
-        print(f"[EmProps Veo] Calling Vertex AI: {generate_endpoint.path}")
+        # Get endpoint for video generation
+        generate_endpoint = get_veo_endpoint(model_id, "predictLongRunning", "vertex_ai")
+        print(f"[EmProps Veo Vertex] Calling API: {generate_endpoint.path}")
 
         initial_response = await sync_op(
             cls,
@@ -196,13 +205,13 @@ class VeoVertexVideoGenerationNode(IO.ComfyNode):
             ),
         )
 
-        print(f"[EmProps Veo] Got operation: {initial_response.name}")
+        print(f"[EmProps Veo Vertex] Got operation: {initial_response.name}")
 
         def status_extractor(response):
             return "completed" if response.done else "pending"
 
-        # Get Vertex AI endpoint for polling
-        poll_endpoint = get_veo_endpoint(model, "fetchPredictOperation")
+        # Get endpoint for polling
+        poll_endpoint = get_veo_endpoint(model_id, "fetchPredictOperation", "vertex_ai")
 
         poll_response = await poll_op(
             cls,
@@ -246,11 +255,11 @@ class VeoVertexVideoGenerationNode(IO.ComfyNode):
 
             # Check if video is provided as base64 or URL
             if hasattr(video, "bytesBase64Encoded") and video.bytesBase64Encoded:
-                print("[EmProps Veo] Video received as base64")
+                print("[EmProps Veo Vertex] Video received as base64")
                 return IO.NodeOutput(VideoFromFile(BytesIO(base64.b64decode(video.bytesBase64Encoded))))
 
             if hasattr(video, "gcsUri") and video.gcsUri:
-                print(f"[EmProps Veo] Video received as GCS URI: {video.gcsUri}")
+                print(f"[EmProps Veo Vertex] Video received as GCS URI: {video.gcsUri}")
                 return IO.NodeOutput(await download_url_to_video_output(video.gcsUri))
 
             raise Exception("Video returned but no data or URL was provided")
@@ -267,7 +276,7 @@ class Veo3VertexVideoGenerationNode(VeoVertexVideoGenerationNode):
     - veo-3.0-generate-001
     - veo-3.0-fast-generate-001
 
-    This node connects directly to Vertex AI using your service account credentials.
+    Requires GCP service account credentials.
     """
 
     @classmethod
@@ -276,7 +285,7 @@ class Veo3VertexVideoGenerationNode(VeoVertexVideoGenerationNode):
             node_id="Veo3VertexVideoGenerationNode",
             display_name="Veo 3 Video (Vertex AI)",
             category="api node/video/Veo",
-            description="Generates videos using Google's Veo 3 API via Vertex AI (direct access)",
+            description="Generates videos using Google's Veo 3 API via Vertex AI (requires GCP credentials)",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -305,12 +314,6 @@ class Veo3VertexVideoGenerationNode(VeoVertexVideoGenerationNode):
                     step=1,
                     display_mode=IO.NumberDisplay.number,
                     tooltip="Duration of the output video in seconds (Veo 3 only supports 8 seconds)",
-                    optional=True,
-                ),
-                IO.Boolean.Input(
-                    "enhance_prompt",
-                    default=True,
-                    tooltip="Whether to enhance the prompt with AI assistance",
                     optional=True,
                 ),
                 IO.Combo.Input(
@@ -368,13 +371,11 @@ class Veo3VertexVideoGenerationNode(VeoVertexVideoGenerationNode):
 class VeoVertexExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
-        # Only register nodes if Vertex AI is configured
-        if is_vertex_ai_configured():
-            return [
-                VeoVertexVideoGenerationNode,
-                Veo3VertexVideoGenerationNode,
-            ]
-        return []
+        # Always register nodes - they'll show auth errors if not configured
+        return [
+            VeoVertexVideoGenerationNode,
+            Veo3VertexVideoGenerationNode,
+        ]
 
 
 async def comfy_entrypoint() -> VeoVertexExtension:
